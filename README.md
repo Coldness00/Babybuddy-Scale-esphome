@@ -64,7 +64,6 @@ Everything is fully autonomous, compact, and 3D‑printed.
 ### 3D‑Printed Parts
 - Complete `.3mf` Bambu Studio project included
 - https://makerworld.com/en/models/2016578-babybuddy-scale#profileId-2172857
-- Designed for snap‑fit assembly  
 - Supports:
   - Load cell mount  
   - Front panel for OLED + buttons  

@@ -1,0 +1,502 @@
+esphome:
+  name: biberon
+  friendly_name: biberon
+  on_boot:
+    priority: -100
+    then:
+      - text_sensor.template.publish:
+          id: full_button_last_time
+          state: !lambda 'return id(stored_full_button_time);'
+      - text_sensor.template.publish:
+          id: empty_button_last_time
+          state: !lambda 'return id(stored_empty_button_time);'
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "PM84lZ3RFLVo9WYZXQVOq1F+IAPQLBlbQGZICfo1av0="
+
+ota:
+  - platform: esphome
+    password: "86cd421d5b7267d4cc3b7062481c7f5c"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  manual_ip:
+    static_ip: 192.168.1.36
+    gateway: 192.168.1.254
+    subnet: 255.255.255.0
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Biberon Fallback Hotspot"
+    password: "SRzkIE3ZinEe"
+
+bluetooth_proxy:
+  active: true
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    timezone: Europe/Paris
+
+globals:
+  - id: weight_threshold
+    type: float
+    initial_value: '10.0'
+    restore_value: true
+  - id: button_pressed
+    type: bool
+    initial_value: 'false'
+  - id: bottle_full_weight
+    type: float
+    initial_value: '0.0'
+    restore_value: true
+  - id: bottle_full_measured
+    type: bool
+    initial_value: 'false'
+    restore_value: true
+  - id: fed_measured
+    type: bool
+    initial_value: 'false'
+    restore_value: true
+  - id: showing_error
+    type: bool
+    initial_value: 'false'
+  - id: stored_full_button_time
+    type: std::string
+    restore_value: yes
+    initial_value: '"unknown"'
+  - id: stored_empty_button_time
+    type: std::string
+    restore_value: yes
+    initial_value: '"unknown"'
+
+
+
+i2c:
+  sda: GPIO16
+  scl: GPIO15
+  frequency: 20000Hz
+  scan: true
+  id: bus_a
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    address: 0x3C
+    update_interval: 1s
+    lambda: |-
+      static unsigned long last_on_time = 0;
+      static bool display_should_be_on = false;
+      float weight = id(bottle_weight).state;
+      if (weight > 5.0) {
+        // Weight detected - show content
+        display_should_be_on = true;
+        last_on_time = millis();
+        it.clear();
+        it.printf(0, 0, id(font_fin), "Poids:");
+        it.printf(0, 14, id(font_large), "%.0f g", weight);
+        if (id(bottle_full_measured)) {
+          it.filled_circle(it.get_width() - 4, 4, 3);
+        }
+        // Show last consumption with time elapsed
+        if (id(bottle_consumption).has_state()) {
+          float last_consumption = id(bottle_consumption).state;
+          if (!std::isnan(last_consumption) && 
+              !std::isinf(last_consumption) && 
+              last_consumption > 0) {
+            // Calculate time elapsed since empty button press
+            auto current_time = id(ha_time).now();
+            if (current_time.is_valid() && id(stored_full_button_time) != "unknown") {
+              // Parse stored time
+              struct tm stored_tm = {};
+              strptime(id(stored_full_button_time).c_str(), "%Y-%m-%d %H:%M:%S", &stored_tm);
+              time_t stored_epoch = mktime(&stored_tm);
+              time_t current_epoch = current_time.timestamp;
+              int elapsed_seconds = current_epoch - stored_epoch;
+              int hours = elapsed_seconds / 3600;
+              int minutes = (elapsed_seconds % 3600) / 60;
+              if (hours > 0) {
+                it.printf(0, 50, id(font_fin), "Bib': %.0fg - %dh%02d", last_consumption, hours, minutes);
+              } else {
+                it.printf(0, 50, id(font_fin), "Bib': %.0fg - %dmin", last_consumption, minutes);
+              }
+            } else {
+              it.printf(0, 50, id(font_fin), "Bib': %.0f g", last_consumption);
+            }
+          }
+        }
+      } else if (display_should_be_on && (millis() - last_on_time > 10000)) {
+        // No weight for 10 seconds - clear display
+        display_should_be_on = false;
+        it.clear();
+      }
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_fin
+    size: 12
+  - file: "gfonts://Roboto"
+    id: font_large
+    size: 30
+
+text_sensor:
+  - platform: template
+    id: full_button_last_time
+    name: "Bottle Full Button Last Press"
+    icon: mdi:clock-time-four-outline
+    #update_interval: never
+
+  - platform: template
+    id: empty_button_last_time
+    name: "Bottle Empty Button Last Press"
+    icon: mdi:clock-time-four-outline
+    #update_interval: never
+
+number:
+  - platform: template
+    name: "Weight Threshold"
+    id: weight_threshold_setting
+    min_value: 0
+    max_value: 1000
+    step: 1
+    unit_of_measurement: "g"
+    mode: box
+    initial_value: 10
+    restore_value: true
+    optimistic: true
+    on_value:
+      then:
+        - globals.set:
+            id: weight_threshold
+            value: !lambda 'return x;'
+
+light:
+  - platform: esp32_rmt_led_strip
+    rgb_order: GRB
+    chipset: WS2812
+    pin: GPIO46
+    num_leds: 3
+    name: "light"
+    id: lightstrip
+    effects:
+      - addressable_lambda:
+          name: "White Fade In"
+          update_interval: 50ms
+          lambda: |-
+            static int brightness = 0;
+            static bool fade_complete = false;
+            if (!fade_complete) {
+              brightness += 5;
+              if (brightness >= 255) {
+                brightness = 255;
+                fade_complete = true;
+              }
+            }
+            it.all() = Color(brightness, brightness, brightness);
+      - addressable_lambda:
+          name: "Yellow Fade Out"
+          update_interval: 30ms
+          lambda: |-
+            static int brightness = 255;
+            static bool fade_started = false;
+            static bool effect_just_started = true;
+
+            // Reset when effect starts
+            if (effect_just_started) {
+              brightness = 255;
+              fade_started = false;
+              effect_just_started = false;
+            }
+
+            if (!fade_started) {
+              fade_started = true;
+            }
+            if (brightness > 0) {
+              brightness -= 3;
+              if (brightness < 0) brightness = 0;
+            }
+
+            // Reset for next time when fade is complete
+            if (brightness == 0) {
+              effect_just_started = true;
+            }
+
+            it.all() = Color(brightness, brightness, 0);
+      - addressable_lambda:
+          name: "Green Fade Out"
+          update_interval: 30ms
+          lambda: |-
+            static int brightness = 255;
+            static bool fade_started = false;
+            static bool effect_just_started = true;
+
+            // Reset when effect starts
+            if (effect_just_started) {
+              brightness = 255;
+              fade_started = false;
+              effect_just_started = false;
+            }
+
+            if (!fade_started) {
+              fade_started = true;
+            }
+            if (brightness > 0) {
+              brightness -= 3;
+              if (brightness < 0) brightness = 0;
+            }
+
+            // Reset for next time when fade is complete
+            if (brightness == 0) {
+              effect_just_started = true;
+            }
+
+            it.all() = Color(0, brightness, 0);
+      - addressable_lambda:
+          name: "Red Pulse"
+          update_interval: 100ms
+          lambda: |-
+            static int brightness = 0;
+            static bool going_up = true;
+            static int pulse_count = 0;
+            static bool effect_reset = true;
+
+            if (effect_reset) {
+              brightness = 0;
+              going_up = true;
+              pulse_count = 0;
+              effect_reset = false;
+            }
+
+            if (pulse_count < 2) {
+              if (going_up) {
+                brightness += 15;
+                if (brightness >= 255) {
+                  brightness = 255;
+                  going_up = false;
+                }
+              } else {
+                brightness -= 15;
+                if (brightness <= 0) {
+                  brightness = 0;
+                  going_up = true;
+                  pulse_count++;
+                }
+              }
+            } else {
+              effect_reset = true;
+            }
+
+            it.all() = Color(brightness, 0, 0);
+
+sensor:
+  - platform: hx711
+    name: "Bottle Scale Value"
+    id: bottle_weight
+    dout_pin: GPIO2
+    clk_pin: GPIO1
+    gain: 128
+    update_interval: 1s
+    filters:
+      - calibrate_linear:
+          - 1300 -> 0.0
+          - 16779 -> 54
+          - 61975 -> 171
+          - 71950 -> 195
+          - 92305 -> 250
+          - 109700 -> 302
+          - 234747 -> 620
+          - 329640 -> 860
+      - delta: 1
+      - lambda: "return x < 0 ? 0 : x;"
+    unit_of_measurement: g
+    accuracy_decimals: 0
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: 'return x < id(weight_threshold) && id(button_pressed);'
+            then:
+              - globals.set:
+                  id: button_pressed
+                  value: 'false'
+        - if:
+            condition:
+              lambda: 'return x >= id(weight_threshold) && !id(button_pressed) && !id(showing_error);'
+            then:
+              - light.turn_on:
+                  id: lightstrip
+                  brightness: 66%
+                  red: 100%
+                  green: 100%
+                  blue: 100%
+                  effect: "White Fade In"
+        - if:
+            condition:
+              lambda: 'return x < id(weight_threshold) && !id(showing_error);'
+            then:
+              - light.turn_off:
+                  id: lightstrip
+
+  - platform: template
+    name: "Bottle Consumption"
+    id: bottle_consumption
+    unit_of_measurement: "g"
+    icon: mdi:scale-balance
+    accuracy_decimals: 0
+    device_class: "weight"
+    state_class: "measurement"
+    lambda: |-
+      if (id(bottle_full_measured) && id(fed_measured)) {
+        float consumption = id(bottle_full_weight) - id(bottle_weight).state;
+        if (consumption >= 0) {
+          return consumption;
+          id(fed_measured) = false;
+        } else {
+          return {}; // Don't update sensor value
+        }
+      } else {
+        return {};
+        // return 0.0;
+      }
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: |-
+                if (id(bottle_full_measured)) {
+                  float consumption = id(bottle_full_weight) - id(bottle_weight).state;
+                  return consumption < 0;
+                }
+                return false;
+            then:
+              - globals.set:
+                  id: showing_error
+                  value: 'true'
+              - light.turn_on:
+                  id: lightstrip
+                  effect: "Red Pulse"
+              - delay: 2s
+              - light.turn_off:
+                  id: lightstrip
+              - globals.set:
+                  id: showing_error
+                  value: 'false'
+binary_sensor:
+  - platform: gpio
+    device_class: lock
+    name: "Bottle Scale Full Button"
+    id: full_button
+    icon: mdi:baby-bottle
+    pin:
+      number: GPIO37
+      inverted: true
+      mode: INPUT_PULLUP
+    on_press:
+      then:
+        - lambda: |-
+            auto t = id(ha_time).now();
+            if (t.is_valid()) {
+              char buf[20]; //9
+              //t.strftime(buf, sizeof(buf), "%H:%M:%S");
+              t.strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S");
+              id(stored_full_button_time) = buf;
+              id(full_button_last_time).publish_state(buf);
+            } else {
+              id(stored_full_button_time) = "unknown";
+              id(full_button_last_time).publish_state("unknown");
+            }
+        - if:
+            condition:
+              lambda: 'return id(bottle_weight).state >= id(weight_threshold) && !id(showing_error);'
+            then:
+              - globals.set:
+                  id: button_pressed
+                  value: 'true'
+              - globals.set:
+                  id: bottle_full_weight
+                  value: !lambda 'return id(bottle_weight).state;'
+              - globals.set:
+                  id: bottle_full_measured
+                  value: 'true'
+              - globals.set:
+                  id: fed_measured
+                  value: 'false'
+              - light.turn_on:
+                  id: lightstrip
+                  effect: "Yellow Fade Out"
+              - delay: 3s
+              - light.turn_off:
+                  id: lightstrip
+            else:
+              - light.turn_on:
+                  id: lightstrip
+                  effect: "Red Pulse"
+              - delay: 2s
+              - light.turn_off:
+                  id: lightstrip
+
+  - platform: gpio
+    device_class: lock
+    name: "Bottle Scale Empty Button"
+    id: empty_button
+    icon: mdi:baby-bottle-outline
+    pin:
+      number: GPIO36
+      inverted: true
+      mode: INPUT_PULLUP
+    on_press:
+      then:
+        - lambda: |-
+            auto t = id(ha_time).now();
+            if (t.is_valid()) {
+              char buf[20]; //9
+              //t.strftime(buf, sizeof(buf), "%H:%M:%S");
+              t.strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S");
+              id(stored_empty_button_time) = buf;
+              id(empty_button_last_time).publish_state(buf);
+            } else {
+              id(stored_empty_button_time) = "unknown";
+              id(empty_button_last_time).publish_state("unknown");
+            }
+        - if:
+            condition:
+              lambda: 'return id(bottle_weight).state >= id(weight_threshold) && id(bottle_full_measured) && !id(showing_error);'
+            then:
+              - globals.set:
+                  id: button_pressed
+                  value: 'true'
+              - globals.set:
+                  id: fed_measured
+                  value: 'true'
+              - component.update: bottle_consumption
+              - globals.set:
+                  id: bottle_full_measured
+                  value: 'false'
+              - globals.set:
+                  id: bottle_full_weight
+                  value: '0.0'
+              - light.turn_on:
+                  id: lightstrip
+                  effect: "Green Fade Out"
+              - delay: 3s
+              - light.turn_off:
+                  id: lightstrip
+            else:
+              - light.turn_on:
+                  id: lightstrip
+                  effect: "Red Pulse"
+              - delay: 2s
+              - light.turn_off:
+                  id: lightstrip

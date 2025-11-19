@@ -41,8 +41,10 @@ Everything is fully autonomous, compact, and 3D‑printed.
   - Green fade out → feeding finished  
   - Red pulse → error or invalid state  
 - **Two physical buttons**
-  - FULL → marks the bottle before feeding  (when pressed a circle is drawn on the top right corner of the screen)
-  - EMPTY → marks the bottle after feeding  
+  - FULL → marks the bottle before feeding
+    When pressed a circle is drawn on the top right corner of the screen
+  - EMPTY → marks the bottle after feeding
+  - When pressed the circle on the top right corner of the screen disappears
 - **Static IP + fallback Wi‑Fi AP**
 - **State restored after reboot** (timestamps, full weight, etc.)
 
